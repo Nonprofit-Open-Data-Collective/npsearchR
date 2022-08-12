@@ -1,0 +1,563 @@
+
+
+# Testing Parsing Data by Akila Forde 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE, warning = FALSE}
+setwd( "H:/data-wrangling" )
+library( postmastr )
+library( tidyverse )
+library( stringi )
+library( tidycensus )
+library( textclean )
+```
+
+## Part one: Parse address fields using **postmastr** package. 
+Documentation for **postmastr**: https://slu-opengis.github.io/postmastr/articles/postmastr.html
+```{r}
+## Loading dirty address data
+d <- read.csv( '../data-raw/reproductive-health-npos-v2.csv' )
+
+## Filtering out address to test the postmastr functions and converting all text to uppercase
+d.address <- d %>% select( address ) %>% mutate_if(is.character, str_to_upper)
+
+head( d.address )
+```
+
+
+Creating address dictionaries for use in the pm_parse functions, both state and directional
+```{r}
+## 
+x.dir <- pm_dictionary(type = "directional", filter = c("N", "S", "E", "W",
+                                                        "NE", "NW", "SW", "SE"), locale = "us")
+x.state <- pm_dictionary(type = "state", case = c("upper"), locale = "us")
+
+head( x.dir )
+head( x.state )
+```
+
+Note: The city dictionary functionality is powered by the get_acs function from the tidycensus package. This requires a Census Bureau API key, which can be obtained at http://api.census.gov/data/key_signup.html. Once you have a key, the census_api_key function from tidycensus should be used to set-up the key before proceeding with the creation of any dictionary objects for cities. 
+(Excludes Armed Americas, Armed Americas Europe Middle East etc) 
+
+
+
+**Note: the pm_dictionary function only takes into account the cities from the 2017 ACS, I've included the code below to update to the 2020 ACS**
+
+```{r }
+# 
+tidycensus::census_api_key( "84381427d420f30520867a40efed18b32acc5993" )
+
+
+af_pm_dictionary_us_cities <- function(append, states){
+
+  out <- af_pm_get_tidycensus(states = states)
+
+  # optionally append
+  if (missing(append) == FALSE){
+
+    # bind rows
+    out <- dplyr::bind_rows(out, append)
+
+    # re-order observations
+    out <- out[order(out$city.input),]
+
+  }
+
+  # return output
+  return(out)
+
+}
+
+# us cities via tidycensus
+af_pm_get_tidycensus <- function(states){
+
+  # global bindings
+  state.abb = NAME = NULL
+
+  # download data
+  states %>%
+    base::split(states) %>%
+    purrr::map_df(~ suppressMessages(
+      tidycensus::get_acs(year = 2020, state = .x, geography = "place", variable = "B01003_001"))) -> data
+
+  # create state dictionary
+  dict <- data.frame(
+    state.name = c(datasets::state.name),
+    state.abb = c(datasets::state.abb),
+    stringsAsFactors = FALSE
+  )
+
+  dict <- dplyr::filter(dict, state.abb %in% states)
+  dict <- dict$state.name
+
+  # parse state names
+  data %>%
+    dplyr::select(NAME) %>%
+    dplyr::mutate(NAME = stringr::str_replace_all(NAME, pattern = ",", replace = "")) %>%
+    pm_parse_place(dictionary = dict) %>%
+    dplyr::mutate(NAME = stringr::str_trim(NAME, side = "right")) -> data
+
+  # create directory
+  dict <- c("city", "town", "village", "CDP")
+
+  # parse place types
+  data %>%
+    pm_parse_place(dictionary = dict) -> data
+
+  # clean-up output
+  data %>%
+    dplyr::mutate(NAME = stringr::str_trim(NAME, side = "right")) %>%
+    dplyr::distinct(NAME, .keep_all = TRUE) %>%
+    dplyr::rename(city.input = NAME) -> data
+
+  # re-order observations
+  data <- data[order(data$city.input),]
+
+  # return output
+  return(data)
+
+}
+
+pm_parse_place <- function(.data, dictionary){
+
+  # global bindings
+  NAME = pm.place = NULL
+
+  # iterate over observations
+  .data %>%
+    dplyr::mutate(pm.place = purrr::map(NAME, ~ pm_extract_pattern(.x, dictionary = dictionary, end = TRUE))) -> .data
+
+  # clean address data
+  .data %>%
+    tidyr::unnest(pm.place) %>%
+    dplyr::filter(is.na(pm.place) == FALSE) %>%
+    
+    dplyr::mutate(pm.place = as.character(pm.place)) %>%
+    dplyr::mutate(NAME = stringr::str_replace(NAME,
+                                              pattern = stringr::str_c("\\b", pm.place, "\\b$"),
+                                              replacement = "")) %>%
+    dplyr::select(-pm.place) -> .data
+
+  return(.data)
+
+}
+
+
+# iterate over dictionary items per observations
+pm_extract_pattern <- function(x, dictionary, end = TRUE){
+
+  # create pattern vector
+  patternVector <- dictionary
+
+  patternVector %>%
+    base::split(patternVector) %>%
+    purrr::map( ~ stringr::str_extract(x, pattern = ifelse (end == TRUE,
+                                                            stringr::str_c("\\b", .x, "\\b$"),
+                                                            stringr::str_c("\\b", .x, "\\b")))) -> out
+
+  return(out)
+
+}
+
+
+```
+
+
+Acquiring the list of potential input cities from Census
+```{r}
+# This takes a while to run
+x.city <- af_pm_dictionary_us_cities(,state.abb) %>% mutate_if(is.character, str_to_upper)
+
+```
+
+
+
+Given that the cities list for Census is not as comprehensive, I'm combining it with a list of the basic cities from https://simplemaps.com/data/us-cities
+
+```{r}
+simple.cities <- read.csv( '../data-raw/uscities.csv' ) %>% select('city') %>% mutate_if(is.character, str_to_upper) %>% rename('city.input' = 'city')
+
+
+merge.city <- merge(simple.cities, x.city, all=TRUE)
+
+head( merge.city )
+```
+
+
+
+OBSOLETE: If there are any outliers append them to the list.
+```{r}
+# #Appending outlying cities not found in the original dictionary
+# city.outliers <- pm_append( type = "city", input = c("FAIR LAWN","BOISE"), locale = "us")
+# 
+# 
+# 
+# ### XX Combine the two datasets
+# # Appending the city dictionary with one found outlier
+# # Check cities
+# 
+# head( x.city )
+```
+
+## Zipcode cleaning
+
+To handle cases where there are 4 digit zipcodes like `7410, introduce the code chunk below
+
+```{r}
+print("Example")
+print(paste("Before:", d.address$address[2]))
+
+# Check that numbers
+
+# Assumes the zipcodes are always the last word in the addess, code below has infrastructure if no zip
+x.last_words <- stri_extract_last_words( d.address$address )
+
+
+## Loop to add a zero in front of any shortened zipcodes, only if the zipcode is four digits long
+for ( i in 1:length( x.last_words ) ){
+  if ( nchar( x.last_words[i]) == 4 ) {
+    d.address$address[i] <- paste( word( d.address$address[i], 1,-2 ),
+                                   paste0( "0", x.last_words[i] ) ) 
+    }
+}
+
+print(paste("After:", d.address$address[2]))
+
+```
+
+
+## Parsing into the 4 main parts of a USPS address (street address, city, state, zip)
+```{r, warning = FALSE}
+
+## Need to ensure the data have a unique identification
+d.address <- pm_identify( d.address, var="address" )
+
+head( d.address )
+
+## Parse the data for cities, and address
+d.parsed <- d.address %>% 
+  pm_parse( input='full', address="address", output = "short", keep_parsed = "limited",
+            dir_dict=x.dir, state_dict=x.state, city_dict=merge.city )
+
+d.parsed <- d.parsed %>%  mutate_if(is.character, str_to_upper)
+head( d.parsed )
+
+
+```
+
+Note 1: Some Census cities are not the same as cities inputed in the data, causing an NA to occur in the city column due to typos and failure to exact match.
+
+### Test Townships
+
+Example:
+```{r}
+d.parsed[75,]
+```
+
+To get the cities for those that aren't on the census list, use the chunk below. It takes from the previous address field, but in the future should include some record linkages to make sure the cities are close.
+Caveat: this may not work if there isn't a zipcode included and if the city is not on census' list
+
+```{r}
+#To remove the city from the address list 
+
+removeWords <- function(str, stopwords) {
+  stop <- unlist(strsplit(stopwords, " "))
+  x <- unlist(strsplit(str, " "))
+  return(paste(x[!x %in% stop], collapse = " "))
+}
+
+```
+
+
+```{r}
+parse_address <- str_match( d.parsed$address,"(.+), (.+), (.+) (.+)" )[, -1]
+
+d.parsed <- subset( d.parsed, select = -address )
+
+
+for ( i in 1:length( parse_address[,2] ) ){
+  if ( is.na( d.parsed$pm.city[i] ) ) {
+    d.parsed$pm.city[i] <- parse_address[i,2]
+    d.parsed$pm.address[i] <- removeWords( d.parsed$pm.address[i], d.parsed$pm.city[i] )
+  }
+}
+
+d.parsed[75,]
+```
+
+
+
+## Part two: Standardizing Street Addresses using postmastr
+
+Current order of operations for parsing Street Address into components
+
+- House Numbers
+
+- Units (Suite, Rm etc)
+
+- Directions (Pre and Suffix N, W, E etc)
+
+- Street Suffixes (St, Blvd)
+
+### Parse House Numbers
+```{r}
+# Need to re-identify
+d.parsed <- pm_identify( d.parsed, var = pm.address )
+
+
+d.parsed <- pm_house_parse( d.parsed )
+
+head( d.parsed )
+```
+
+### Parse Units
+
+Create dictionary
+```{r}
+# Dictionary acquired from: https://pe.usps.com/text/pub28/28apc_003.htm
+
+unit.input <- c("Apartment", "Basement", "Building", "Department", "Floor",
+               "Front", "Hanger", "Key", "Lobby", "Lot", "Lower", "Office", 
+               "Penthouse", "Pier", "Rear", "Room", "Side", "Slip", "Space", 
+               "Stop", "Suite", "Trailer", "Unit", "Upper")
+
+unit.output <- c("APT", "BSMT", "BLDG", "DEPT", "FL", "FRNT", "HNGR", "KEY",
+              "LBBY", "LOT", "LOWR", "OFC", "PH", "PIER", "REAR", "RM",
+              "SIDE", "SLIP", "SPC", "STOP", "STE", "TRLR", "UNIT", "UPPR")
+#Combine into dataframe
+x.unit <- as.data.frame( cbind( unit.input, unit.output ) )
+
+
+for ( i in 1:length( unique( x.unit$unit.output ) ) ) {
+  #Acquire lower and upper case for all potential unit spellings
+  upper <- toupper( x.unit$unit.input[i] )
+  u_actual <- x.unit$unit.output[i]
+  for ( w in c( upper, u_actual) ) { 
+    x.unit[nrow( x.unit ) + 1,] <- c( w, x.unit$unit.output[i] )
+     x.unit[nrow( x.unit ) + 1,] <- c( paste0(w, "S"), x.unit$unit.output[i] )
+  }
+  
+}
+
+# Remove duplicates
+x.unit <- x.unit[!duplicated(x.unit), ]
+
+
+
+```
+
+
+```{r Exception list for Units}
+
+#Do not require a secondary range to follow
+
+no.range <- str_to_upper(c("Basement", "Front", "Lower", "Lobby", "Office", 
+               "Penthouse", "Rear", "Side", "Upper"))
+
+```
+
+
+Create parse unit function:
+Supposed to:
+
+- Loop over a dataframe by row, using the dictionary of unit words
+
+- Unlist the Street address into a list of words
+
+- Find the location of the unit word if it exists in the street address
+
+- If a unit word exists:
+
+  - Determine if the unit word is followed by a range like "Suite C"
+  
+  - If the unit word has a range, add the range to a pm.unit.num column and remove it from the street address
+  
+  - retrieves which unit word from the Street address words list, and the standardized form of the word from the unit dictionary
+  
+  - adds the standardized unit term into pm.unit column and removes the original unit word from the street address list
+  
+  - reconcatnate the street address list and replace the street address string with it
+  
+```{r}
+# To loop over a dataframe by row
+extract_unit <- function(.row, dictionary, exception.dict) {
+  
+  dict <- paste(dictionary$unit.input, collapse = "|")
+  
+
+  words <- unlist( str_split( .row$pm.address, " " ) )
+  #print( paste("Street Address:", words) )
+  ## find location of unit word if exists
+  if (str_detect(.row$pm.address, "LOT")) {
+    unit.loc.lst <- which( str_detect( words, "LOT") )
+  } else {
+    unit.loc.lst <- which( str_detect( words, pattern = str_c( "\\b(", dict, ")\\b") ) )
+  }
+  
+  unit.loc <- NA
+
+  # TODO Add exception for if the word following is in the suffix list
+  
+  if ( length(unit.loc.lst) > 1){
+    unit.loc <- unit.loc.lst[-1]
+  } else if ( length(unit.loc.lst) == 1) {
+    unit.loc <- unit.loc.lst
+  }
+
+
+  
+  #If there is a unit word
+  if ( !is.na(unit.loc) ) {
+    
+    unit.word <- words[ unit.loc ]
+    #If the unit word is in the list of no range unit addresses (like office and front)
+    if ( unit.word %in% exception.dict) {
+      #print("Has a no range word")
+      #Units like Office or Front should not be followed by anything
+      if (unit.loc < length(words)) {
+        #Collapse and return the address
+        .row$pm.address <- paste( words, collapse = " " )
+        return(.row)
+      }
+        
+        x.input.loc <- which( x.unit$unit.input == unit )
+    
+        x.output <- dictionary$unit.output[ x.input.loc ]
+        .row$pm.unit <- x.output
+        words <- words[ words != unit ]
+        .row$pm.address <- paste( words, collapse = " " )
+        return(.row)
+    } else {
+      if ( unit.loc < length(words) ) {
+        #Pull unit number substring
+        .row$pm.unit.num <- word( .row$pm.address, unit.loc+1, -1 )
+        words <- words[1:unit.loc]
+
+      }
+      unit <- words[ unit.loc ]
+      x.input.loc <- which( x.unit$unit.input == unit )
+      x.output <- dictionary$unit.output[ x.input.loc ]
+      .row$pm.unit <- x.output
+      words <- words[ words != unit ]
+      .row$pm.address <- paste( words, collapse = " " )
+
+    }
+  }
+  return(.row)
+}
+    
+
+
+```
+
+
+```{r}
+# For testing purposes
+#backup <- d.parsed
+#d.parsed <- backup
+```
+
+
+Looping over the parsed addresses to clean out the units:
+
+- LOGIC DOESN'T ACCOUNT FOR PLURAL UNITS like "Suites"
+
+- LOGIC BREAKS IF PARANTHESES ARE INCLUDED eg. (LOT-MOBILE UNIT)
+
+
+
+```{r Outliers in Parenthesis}
+
+paren_outliers <- function(.row){
+  
+  #Remove parenthesis
+  paren.output <- gsub("[()]", "\\1", .row$pm.address)
+  
+  #Split if has hyphen
+  paren.output <- strsplit(paren.output, "-|\\s")
+
+  #Re-combine
+  paren.output <- paste( paren.output[[1]] , collapse = " " )
+  return(paren.output)
+}
+
+```
+
+
+```{r}
+d.parsed <- as.data.frame(d.parsed)
+d.parsed$pm.unit <- NA
+d.parsed$pm.unit.num <- NA
+
+for (i in 1:nrow( d.parsed ) ) {
+  d.parsed[i,]$pm.address <- gsub("[^[:alnum:][:blank:]?&()/\\-]", " ", d.parsed[i,]$pm.address)
+  
+  if (str_detect(d.parsed[i,]$pm.address, " \\(.*\\)")) {
+   d.parsed[i,]$pm.address <- paren_outliers(d.parsed[i,])
+  }
+
+  d.parsed[i, ] <- extract_unit(d.parsed[i,], x.unit, no.range)
+}
+
+
+```
+
+
+
+<!-- ```{r} -->
+<!-- d.parsed.unit <- d.parsed -->
+<!-- ``` -->
+
+
+### Parse Directionals
+```{r}
+d.parsed <- pm_streetDir_parse(d.parsed, dictionary = x.dir)
+
+head( d.parsed )
+```
+
+
+
+### Parse Street Suffixes
+
+** Outlier: Currently fails if the address contains more than one street suffix, like
+- Plaza Place
+
+- Office Plaza Place
+
+- Front Street ** 
+```{r}
+d.parsed <- pm_streetSuf_parse(d.parsed)
+
+head( d.parsed )
+
+```
+
+
+
+### Parse Street Names
+
+**Front Street Implementations are being removed as NA **
+
+```{r}
+d.parsed <- pm_street_parse(d.parsed)
+
+head( d.parsed )
+
+```
+
+
+### Put back together
+
+Once the data is arsed we can put it back together using `r pm_replace`
+
+```{r}
+
+new.d.parsed <- pm_replace(d.parsed, source = d.address)
+
+```
+
