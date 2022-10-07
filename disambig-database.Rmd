@@ -1,0 +1,409 @@
+---
+title: "Disambiguation Database"
+author: "Akila Forde"
+date: '2022-07-21'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(data.table)
+
+#setwd( "H:/data-raw/bmf"  )
+```
+
+
+<!-- ## Testing Disambiguation Database -->
+
+<!-- First, getting a test file from the NCCS Business Master File [resource](https://datacatalog.urban.org/dataset/national-center-charitable-statistics-ncc-irs-business-master-file/resource/ffbeb4d8-27e5).  -->
+
+<!-- Figure out if this is only for a single year -->
+
+<!-- ```{r} -->
+<!-- # download all regions and combine into a single dataset -->
+
+<!-- region.01 <- read.csv( "https://www.irs.gov/pub/irs-soi/eo1.csv" , stringsAsFactors=F )   -->
+
+<!-- region.02 <- read.csv( "https://www.irs.gov/pub/irs-soi/eo2.csv" , stringsAsFactors=F ) -->
+
+<!-- region.03 <- read.csv( "https://www.irs.gov/pub/irs-soi/eo3.csv" , stringsAsFactors=F ) -->
+
+<!-- region.04 <- read.csv( "https://www.irs.gov/pub/irs-soi/eo4.csv" , stringsAsFactors=F ) -->
+
+
+<!-- bmf <- rbind( region.01, region.02, region.03, region.04 ) -->
+
+<!-- rm(region.01, region.02, region.03, region.04) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+
+<!-- # The rule date is formatted as YYYY-MM, so split out the year -->
+
+<!-- bmf$RULEYEAR <- substr( bmf$RULING, 1, 4 ) -->
+
+<!-- # barplot of ruling dates -->
+<!-- options( scipen=8 ) -->
+<!-- barplot( table( bmf$RULEYEAR ), las=2, cex.names=0.5, col="gray40", border=NA ) -->
+<!-- abline( h=seq(20000,100000,20000), col="white", lwd=2 ) -->
+<!-- title( main="Ruling Dates of Existing Nonprofits" ) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # the NTEE codes created by the IRS are very messy with lots of errors -->
+
+<!-- #table( bmf$NTEE ) -->
+
+<!-- # create to top level group - see documentation below -->
+
+<!-- bmf$LEVEL4 <- substr( bmf$NTEE_CD, 0, 1 ) -->
+
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # SEPARATE ACTIVITY CODES -->
+<!-- # -->
+<!-- # The variable ACTIVITIES consists of three separate 3-digit activity codes. -->
+<!-- # Split these into separate variables. -->
+<!-- # Documentation available below. -->
+
+<!-- bmf$ACT1 <- substr( bmf$ACTIVITY, 1, 3 ) -->
+
+<!-- bmf$ACT2 <- substr( bmf$ACTIVITY, 4, 6 ) -->
+
+<!-- bmf$ACT3 <- substr( bmf$ACTIVITY, 7, 9 ) -->
+<!-- ``` -->
+
+
+
+<!-- # Cleaning the bmf data -->
+
+<!-- To prepare the Business Master File, create a file with (1) name, (2) ein, (3) address fields, (4) NTEE code, (5) size (expenses, revenue, assets), (6) source and date of data. -->
+
+<!-- ```{r} -->
+
+<!-- bmf_file <- bmf %>% mutate(ZIP5 = substring(ZIP, 1, 5)) %>% -->
+<!--             select(NAME, EIN, STREET, CITY, STATE, ZIP5, NTEE_CD, -->
+<!--                    ASSET_AMT, INCOME_AMT, REVENUE_AMT, SORT_NAME) -->
+
+
+<!-- saveRDS( bmf_file, file="BusinessMasterFile.rds" ) -->
+<!-- ``` -->
+
+
+<!-- # Testing matching -->
+
+<!-- ```{r} -->
+<!-- library(reclin2) -->
+
+<!-- #Load saved BMF file -->
+<!-- bmf <- readRDS("BusinessMasterFile.rds") -->
+
+<!-- set.seed(17) -->
+
+<!-- #Load organization input -->
+<!-- yes.match <- read.csv("../data-raw/Matches1to13615.csv") %>% -->
+<!--         select( recipient_name, recipient_city_name,  -->
+<!--               recipient_state_code, recipient_zip) %>% -->
+<!--   rename( "NAME" = "recipient_name" , "CITY" = "recipient_city_name" , -->
+<!--          "STATE" = "recipient_state_code", "ZIP5" = "recipient_zip" ) %>%  -->
+<!--   #Convert to uppercase -->
+<!--   mutate_if(is.character, str_to_upper) %>%  -->
+<!--   #Pad Zipcode with zeros if string is less than 5 characters -->
+<!--   mutate(ZIP5 = str_pad(ZIP5, 5, side="left", pad="0")) -->
+
+<!-- #Taking a sample -->
+<!-- yes.sample <- sample_n(yes.match, 100) -->
+
+
+
+<!-- ``` -->
+
+<!-- Blocking on State, returns 6.3 million pairs (100 inputs with 1.8 mil in the BMF) and matching on Largest common substring for both Name and City. -->
+
+<!-- ```{r} -->
+<!-- y.pairs <-  pair_blocking(yes.sample, bmf, "STATE") %>%  -->
+<!--           compare_pairs(y.pairs, on = c("NAME", "CITY"),  -->
+<!--                         comparators = list(NAME = lcs(), CITY = lcs())) -->
+
+
+<!-- model <- problink_em(~ NAME, data = y.pairs) -->
+
+<!-- pairs <- predict(model, y.pairs, c("weights", "mpost"), add = TRUE, binary = TRUE) -->
+
+
+<!-- pairs <- select_greedy(pairs, "weights", variable = "greedy", threshold = 0) -->
+
+
+<!-- pairs <- select_n_to_m(pairs, "weights", variable = "ntom", threshold = 0) -->
+
+
+<!-- ``` -->
+
+<!-- Linking pairs based on name -->
+
+<!-- ```{r} -->
+<!-- greedy <- link(pairs, selection = "greedy") -->
+
+<!-- # Impressive -->
+<!-- ntom <- link(pairs, selection = "ntom") -->
+<!-- ``` -->
+
+<!-- NtoM matched 80/100 NPOs accurately, Greedy also matched 80/100 but had false positives (When matched on just name) -->
+
+
+<!-- ```{r} -->
+
+<!-- unmatched <- yes.sample$NAME[which(!(yes.sample$NAME %in% ntom$NAME.x))] -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- unmatched -->
+
+
+<!-- ``` -->
+
+
+# Testing BMF Master file
+
+```{r}
+
+#Load saved BMF file
+bmf <- readRDS("../data-raw/bmf/bmf-master.rds")
+
+bmf <- bmf %>% 
+  mutate(ZIP5 = str_pad(ZIP5, 5, side="left", pad="0")) %>% 
+            select(NAME, EIN, ADDRESS, CITY, STATE, ZIP5, NTEEFINAL, 
+                   ASSETS, INCOME)
+
+
+```
+
+Load in the test data, converting case to upper and padding the zipcode with extra zeros if too short. Then taking a sample of 100 organizations. For purposes of user use, the organizations should be in the form of a dataframe if components has more than just org name.
+
+```{r}
+set.seed(17)
+
+#Load organization input
+yes.match <- read.csv("../data-raw/Matches1to13615.csv") %>%
+        select( recipient_name, recipient_city_name, 
+              recipient_state_code, recipient_zip, EIN) %>%
+  rename( "NAME" = "recipient_name" , "CITY" = "recipient_city_name" ,
+         "STATE" = "recipient_state_code", "ZIP5" = "recipient_zip" ) %>% 
+  #Convert to uppercase
+  mutate_if(is.character, str_to_upper) %>% 
+  #Pad Zipcode with zeros if string is less than 5 characters
+  mutate(ZIP5 = str_pad(ZIP5, 5, side="left", pad="0"))
+
+#Taking a sample
+yes.sample <- sample_n(yes.match, 100)
+
+rm(yes.match)
+
+```
+
+## If input organization has address attributes like State, City:
+
+Blocking on state to speed it up
+
+```{r}
+library(reclin2)
+
+system.time(y.pairs <-  pair_blocking(yes.sample, bmf, "STATE") %>% 
+          compare_pairs(y.pairs, on = c("NAME", "CITY"), 
+                        comparators = list(NAME = lcs(), CITY = lcs())))
+
+
+system.time(model <- problink_em(~ NAME, data = y.pairs))
+
+system.time(pairs <- predict(model, y.pairs, c("weights", "mpost"), add = TRUE, binary = TRUE))
+
+
+system.time(pairs <- select_greedy(pairs, "weights", variable = "greedy", threshold = 0))
+
+
+system.time(pairs <- select_n_to_m(pairs, "weights", variable = "ntom", threshold = 0))
+
+
+```
+Returns 89 matches, but with more false positives on the ntom side
+
+
+```{r}
+greedy <- link(pairs, selection = "greedy")
+
+# Impressive
+ntom <- link(pairs, selection = "ntom")
+```
+
+
+# Find the non-matches
+
+
+```{r}
+# CHECKING THOSE THAT ARE IN THE BMF
+
+length( intersect( yes.sample$EIN, bmf$EIN ) )
+
+setdiff(ntom$EIN.y, yes.sample$EIN)
+
+setdiff(ntom$EIN.y, ntom$EIN.x)
+
+
+### Returning the pairs that didn't match
+false_negs <- pairs$.x[which(pairs$.x == pairs$.y & pairs$ntom == FALSE)]
+false_negs_y <- pairs$.y[which(pairs$.x == pairs$.y & pairs$ntom == FALSE)]
+
+
+pairs[which(pairs$.x == pairs$.y & pairs$ntom == FALSE)]
+yes.sample[false_negs,]
+bmf[false_negs_y,]
+
+
+false_pos <- pairs$.x[which(pairs$.x != pairs$.y & pairs$ntom == TRUE)]
+false_pos_y <- pairs$.y[which(pairs$.x != pairs$.y & pairs$greedy == TRUE)]
+
+
+```
+
+
+
+#Parallelization of reclin2
+
+Excellent tutorial found here: https://cran.r-project.org/web/packages/reclin2/vignettes/using_a_cluster_for_record_linkage.html
+
+```{r}
+library(parallel)
+#library(reclin2)
+
+num.cores <- detectCores()
+
+#Start a cluster with n nodes.
+cl <- makeCluster(num.cores - 1 )
+
+#Execute any pre-processing code necessary in each node (e.g. loading a package)cl <- makeCluster(2)
+
+
+#Blocking pairs by State, if address is included
+cl.pairs <- cluster_pair_blocking(cl, yes.sample, bmf, "STATE")
+#system.time(cl.pairs <- cluster_pair_blocking(cl, yes.sample, bmf, "STATE"))
+
+
+# Collect pairs from the clusters
+#local_pairs <- cluster_collect(cl.pairs, clear = FALSE)
+system.time(local_pairs <- cluster_collect(cl.pairs, clear = FALSE))
+
+## Compare names by Longest common substring algorithm
+#compare_pairs(cl.pairs, on = "NAME", comparators = list(NAME = lcs()))
+system.time(compare_pairs(cl.pairs, on = "NAME", comparators = list(NAME = lcs())))
+
+## Implement model based on Name 
+#cl.model <- problink_em(~ NAME, data = cl.pairs)
+system.time(cl.model <- problink_em(~ NAME, data = cl.pairs))
+
+
+## Predict weights based on Name
+#cl.pairs <- predict(cl.model, cl.pairs, type = "weights", add = TRUE, binary = TRUE)
+system.time(cl.pairs <- predict(cl.model, cl.pairs, type = "weights", add = TRUE, binary = TRUE))
+
+# Select and collect pairs which meet a certain threshold
+system.time(cl.pairs <- select_threshold(cl.pairs, "threshold", score = "weights", threshold = 0))
+system.time(local_pairs <- cluster_collect(cl.pairs, "threshold"))
+
+
+# Select pairs using the ntom algorithm
+system.time(local_pairs <- select_n_to_m(local_pairs, "weights", variable = "ntom", threshold = 0))
+
+
+# True matched pairs
+local_pairs <- compare_vars(local_pairs, "truth",  on_x = "EIN", on_y = "EIN")
+
+table(local_pairs$truth, local_pairs$ntom)
+
+system.time(linked_data_set <- link(local_pairs, selection = "ntom"))
+
+stopCluster(cl)
+
+
+### Will need to re-order the items
+linked_data_set <- cbind(yes.sample[linked_data_set$.x, ] , bmf[linked_data_set$.y,] )
+
+```
+
+
+## To-do
+
+Run agrep version - to gain time for
+
+```{r}
+system.time(
+for (i in nrow(yes.sample)){
+  for (j in nrow(bmf)){
+    
+    if (agrep(yes.sample$NAME[i], bmf$NAME[j], max.distance = 0.2) != 0){
+      print(yes.sample$NAME[i], bmf$NAME[j] )
+    }
+    
+  }
+}
+)
+
+```
+
+
+
+# Change the clusters
+
+
+<!-- Introducing the fuzzy wuzzy package to better refine the matches from reclin2 -->
+
+<!-- ```{r} -->
+<!-- # Must load reticulate::py_config() before loading the package -->
+<!-- reticulate::py_config() -->
+
+<!-- library(fuzzywuzzyR) -->
+
+<!-- refine_matches <- function(df){ -->
+
+<!--   dt <- data.frame() -->
+<!--   for (i in 1:nrow(df)) { -->
+
+<!--     # returns ratio of two strings potentially matching, uses python's diflib package -->
+<!--     init = SequenceMatcher$new(string1 = df$NAME.x[i], string2 = df$NAME.y[i]) -->
+
+<!--     if (init$ratio() > 0.8){ -->
+
+<!--       dt <- rbind(dt, df[i,]) -->
+<!--     } -->
+
+<!--   } -->
+<!--   return(dt) -->
+
+<!-- } -->
+
+<!-- ``` -->
+
+
+
+<!-- # Testing fuzzyjoin package -->
+<!-- # ```{r} -->
+<!-- #  -->
+<!-- # library(fuzzyjoin) -->
+<!-- #  -->
+<!-- # fuzz.join <- stringdist_inner_join(yes.sample, bmf, -->
+<!-- #                       method = "lv", -->
+<!-- #                       by = c("NAME", "STATE"), -->
+<!-- #                       max_dist = 6) -->
+<!-- # ``` -->
+

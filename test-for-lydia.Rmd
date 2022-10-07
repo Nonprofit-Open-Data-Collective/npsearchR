@@ -1,0 +1,379 @@
+---
+title: "Test Sample"
+author: "Akila Forde"
+date: '2022-08-03'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Test data for Julia
+
+## 1. Load libraries
+
+```{r}
+library(tidyverse)
+library(reclin2)
+library(parallel)
+library(postmastr)
+```
+
+
+## 2. Load input and output data
+```{r}
+
+#Load saved BMF file
+bmf <- readRDS("../data-raw/bmf/bmf-master.rds")
+
+bmf <- bmf %>% 
+  mutate(ZIP5 = str_pad(ZIP5, 5, side="left", pad="0")) %>% 
+            select(NAME, EIN, ADDRESS, CITY, STATE, ZIP5, NTEEFINAL, 
+                   ASSETS, INCOME)
+
+```
+
+Need to figure out a standardized form of the pertinent columns as reclin2 comparison only works if the columns are the same. 
+
+
+```{r}
+input <- read.csv("../data-raw/lydia-lo-sample.csv") %>%
+  
+        #pm_parse works with short address, so need to concatnate the two address fields
+        mutate(ADDRESS = ifelse(!is.na(address_1) & !is.na(address_2), paste0(address_1, address_2), address_1)) %>% 
+  rename( "NAME" = "organization_name_1" , "CITY" = "city" ,
+         "STATE" = "state", "ZIP5" = "zipcode", "EIN" = "ein" ) %>% 
+  select( NAME, EIN, ADDRESS, CITY, STATE, ZIP5 ) %>% 
+  #Convert to uppercase
+  mutate_if(is.character, str_to_upper) %>% 
+  #Pad Zipcode with zeros if string is less than 5 characters
+  mutate(ZIP5 = str_pad(ZIP5, 5, side="left", pad="0"))
+
+```
+
+
+
+## Step 3: Separate data between addresses and no address. Number of nonaddress inputs
+
+```{r}
+
+yes.address <- input[!is.na(input$ADDRESS), ]
+no.address <- input[is.na(input$ADDRESS), ]
+
+```
+
+
+## Step 4:
+Test non-addresses through parallelization since it is a smaller sample and hopefully will not break. Note: is breaking with 
+Error in checkForRemoteErrors(val) : 
+  one node produced an error: cannot allocate vector of size 1.1 Gb
+
+```{r}
+
+library(doParallel)
+
+#Detect number of cores and use one less than the max
+num.cores <- detectCores()
+
+#Start a cluster with n nodes.
+cl <- makeCluster(num.cores[1] - 2 )
+
+registerDoParallel(cl)
+
+#Blocking pairs by State, if address is included
+cl.pairs <- cluster_pair(cl, no.address, bmf)
+
+# Collect pairs from the clusters
+local_pairs <- cluster_collect(cl.pairs, clear = FALSE)
+
+## Compare names, address and city by Longest common substring algorithm
+compare_pairs(cl.pairs, on = c("NAME"), comparators = list(NAME = lcs()))
+
+## Implement model based on Name,  
+cl.model <- problink_em(~ NAME, data = cl.pairs)
+
+## Predict weights based on Name, Address and CITY
+cl.pairs <- predict(cl.model, cl.pairs, type = "weights", add = TRUE, binary = TRUE)
+
+# Select and collect pairs which meet a certain threshold
+cl.pairs <- select_threshold(cl.pairs, "threshold", score = "weights", threshold = 0)
+local_pairs <- cluster_collect(cl.pairs, "threshold")
+
+
+# Select pairs using the ntom algorithm
+local_pairs <- select_n_to_m(local_pairs, "weights", variable = "ntom", threshold = 0)
+
+
+linked_data_set <- link(local_pairs, selection = "ntom")
+
+stopCluster(cl)
+
+```
+
+
+
+
+
+# STEP CURRENTLY NOT WORKING
+3. Standardize Address Fields in Input data
+
+Helper function for unit extractions
+```{r}
+# Dictionary acquired from: https://pe.usps.com/text/pub28/28apc_003.htm
+
+unit.input <- c("Apartment", "Basement", "Building", "Department", "Floor",
+               "Front", "Hanger", "Key", "Lobby", "Lot", "Lower", "Office", 
+               "Penthouse", "Pier", "Rear", "Room", "Side", "Slip", "Space", 
+               "Stop", "Suite", "Trailer", "Unit", "Upper")
+
+unit.output <- c("APT", "BSMT", "BLDG", "DEPT", "FL", "FRNT", "HNGR", "KEY",
+              "LBBY", "LOT", "LOWR", "OFC", "PH", "PIER", "REAR", "RM",
+              "SIDE", "SLIP", "SPC", "STOP", "STE", "TRLR", "UNIT", "UPPR")
+#Combine into dataframe
+x.unit <- as.data.frame( cbind( unit.input, unit.output ) )
+
+
+# Code to add to x.unit dictionary
+for ( i in 1:length( unique( x.unit$unit.output ) ) ) {
+  #Acquire lower and upper case for all potential unit spellings
+  upper <- toupper( x.unit$unit.input[i] )
+  u_actual <- x.unit$unit.output[i]
+  for ( w in c( upper, u_actual) ) { 
+    x.unit[nrow( x.unit ) + 1,] <- c( w, x.unit$unit.output[i] )
+     x.unit[nrow( x.unit ) + 1,] <- c( paste0(w, "S"), x.unit$unit.output[i] )
+  }
+  
+}
+
+# Remove duplicates
+x.unit <- x.unit[!duplicated(x.unit), ]
+
+# List of words without a range following
+no.range <- str_to_upper(c("Basement", "Front", "Lower", "Lobby", "Office", 
+               "Penthouse", "Rear", "Side", "Upper"))
+
+
+### Extract Unit function
+extract_unit <- function(.row, dictionary, exception.dict) {
+  
+  dict <- paste(dictionary$unit.input, collapse = "|")
+  
+
+  words <- unlist( str_split( .row$pm.address, " " ) )
+  #print( paste("Street Address:", words) )
+  ## find location of unit word if exists
+  if (str_detect(.row$pm.address, "LOT")) {
+    unit.loc.lst <- which( str_detect( words, "LOT") )
+  } else {
+    unit.loc.lst <- which( str_detect( words, pattern = str_c( "\\b(", dict, ")\\b") ) )
+  }
+  
+  unit.loc <- NA
+
+
+  if ( length(unit.loc.lst) > 1){
+    unit.loc <- unit.loc.lst[-1]
+  } else if ( length(unit.loc.lst) == 1) {
+    unit.loc <- unit.loc.lst
+  }
+
+
+  
+  #If there is a unit word
+  if ( !is.na(unit.loc) ) {
+    
+    unit.word <- words[ unit.loc ]
+    #If the unit word is in the list of no range unit addresses (like office and front)
+    if ( unit.word %in% exception.dict) {
+      #print("Has a no range word")
+      #Units like Office or Front should not be followed by anything
+      if (unit.loc < length(words)) {
+        #Collapse and return the address
+        .row$pm.address <- paste( words, collapse = " " )
+        return(.row)
+      }
+        
+        x.input.loc <- which( x.unit$unit.input == unit )
+    
+        x.output <- dictionary$unit.output[ x.input.loc ]
+        .row$pm.unit <- x.output
+        words <- words[ words != unit ]
+        .row$pm.address <- paste( words, collapse = " " )
+        return(.row)
+    } else {
+      if ( unit.loc < length(words) ) {
+        #Pull unit number substring
+        .row$pm.unit.num <- word( .row$pm.address, unit.loc+1, -1 )
+        words <- words[1:unit.loc]
+
+      }
+      unit <- words[ unit.loc ]
+      x.input.loc <- which( x.unit$unit.input == unit )
+      x.output <- dictionary$unit.output[ x.input.loc ]
+      .row$pm.unit <- x.output
+      words <- words[ words != unit ]
+      .row$pm.address <- paste( words, collapse = " " )
+
+    }
+  }
+  return(.row)
+}
+
+
+### If there are any outliers in parentheses
+paren_outliers <- function(.row){
+  
+  #Remove parenthesis
+  paren.output <- gsub("[()]", "\\1", .row$pm.address)
+  
+  #Split if has hyphen
+  paren.output <- strsplit(paren.output, "-|\\s")
+
+  #Re-combine
+  paren.output <- paste( paren.output[[1]] , collapse = " " )
+  return(paren.output)
+}
+
+### Unit Parse function'
+
+pm_unit_parse <- function(df, dictionary, exceptions){
+
+    df <- as.data.frame(df)
+    df$pm.unit <- NA
+    df$pm.unit.num <- NA
+    
+
+    
+    for (i in 1:nrow( df ) ) {
+      
+      df[i,]$pm.address <- gsub("[^[:alnum:][:blank:]?&()/\\-]", " ", df[i,]$pm.address)
+      print(i)
+      if (str_detect(df[i,]$pm.address, " \\(.*\\)")) {
+       df[i,]$pm.address <- paren_outliers(df[i,])
+      }
+      
+      df[i, ] <- extract_unit(df[i,], dictionary, exceptions)
+    }
+ return(df)   
+}
+
+
+```
+
+
+This assumes working with short addresses, will need to implement different code and dictionaries when working with full addresses
+
+```{r}
+
+
+#Assumes working with short addresses, 
+standardize_address <- function(df) {
+  
+    #Create dictionaries
+    dir <- pm_dictionary(type = "directional", filter = c("N", "S", "E", "W","NE", "NW", "SW", "SE"), locale = "us")
+    state <- pm_dictionary(type = "state", case = c("upper"), locale = "us")
+    sufs <- pm_dictionary(type = "suffix", locale = "us")
+    
+    
+    # Parse the short addresses
+    parsed <- pm_identify( df, var = "ADDRESS") %>%
+              pm_parse(df, input = "full", address = ADDRESS, output = "full", keep_parsed = "no", dir_dict = dir, suffix_dict = sufs)
+      %>%  mutate_if(is.character, str_to_upper)
+
+    #Create a copy
+    c.parsed <- parsed
+    
+    
+    # Need to identify the dataframe again
+    parsed <- pm_identify( parsed, var = "ADDRESS")
+    
+    # Parse out House numbers
+    parsed <- pm_house_parse()
+    
+    
+      
+    
+    
+    
+    
+  
+}
+```
+
+
+Record linkage using the reclin2 package. Attempting without parallelization at this moment since there are core issues. Creates 47 mill pairs
+
+
+```{r}
+
+y.pairs <-  pair_blocking(yes.address, bmf, "STATE")
+
+compare_pairs(y.pairs, on = c("NAME", "CITY", "ADDRESS"), 
+                        comparators = list(NAME = lcs(), CITY = lcs()), ADDRESS = lcs())
+
+
+system.time(model <- problink_em(~ NAME, data = y.pairs))
+
+system.time(pairs <- predict(model, y.pairs, c("weights", "mpost"), add = TRUE, binary = TRUE))
+
+
+system.time(pairs <- select_greedy(pairs, "weights", variable = "greedy", threshold = 0))
+
+
+system.time(pairs <- select_n_to_m(pairs, "weights", variable = "ntom", threshold = 0))
+
+
+```
+
+
+Parallelization step for speed, and usage for the NPOs with address. Currently, the parallelization breaks with a space error when using 6 or 5 cores of an 8 core machine.
+
+```{r}
+
+library(parallel)
+library(doParallel)
+
+#Detect number of cores and use one less than the max
+num.cores <- detectCores()
+
+#Start a cluster with n nodes.
+cl <- makeCluster(num.cores[1] - 4 )
+
+registerDoParallel(cl)
+
+#Blocking pairs by State, if address is included
+cl.pairs <- cluster_pair_blocking(cl, yes.address, bmf, "STATE")
+
+# Collect pairs from the clusters
+local_pairs <- cluster_collect(cl.pairs, clear = FALSE)
+
+## Compare names, address and city by Longest common substring algorithm
+compare_pairs(cl.pairs, on = c("NAME", "CITY", "ADDRESS"), comparators = list(NAME = lcs(), ADDRESS = lcs(), CITY = lcs()))
+
+## Implement model based on Name,  
+cl.model <- problink_em(~ NAME + ADDRESS + CITY, data = cl.pairs)
+
+## Predict weights based on Name, Address and CITY
+cl.pairs <- predict(cl.model, cl.pairs, type = "weights", add = TRUE, binary = TRUE)
+
+# Select and collect pairs which meet a certain threshold
+cl.pairs <- select_threshold(cl.pairs, "threshold", score = "weights", threshold = 0)
+local_pairs <- cluster_collect(cl.pairs, "threshold")
+
+
+# Select pairs using the ntom algorithm
+local_pairs <- select_n_to_m(local_pairs, "weights", variable = "ntom", threshold = 0)
+
+
+table(local_pairs$truth, local_pairs$ntom)
+
+linked_data_set <- link(local_pairs, selection = "ntom")
+
+stopCluster(cl)
+
+
+### Will need to re-order the items
+linked_data_set <- cbind(yes.sample[linked_data_set$.x, ] , bmf[linked_data_set$.y,] )
+```
+

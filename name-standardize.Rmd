@@ -1,0 +1,65 @@
+---
+title: "Standardize Names"
+author: "Akila Forde"
+date: '2022-07-01'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages and data
+
+
+```{r, message = FALSE, warning = FALSE}
+setwd( "H:/data-wrangling" )
+library( postmastr )
+library( tidyverse )
+library( stringi )
+library( tidycensus )
+```
+
+```{r}
+## Loading dirty address data
+d <- read.csv( '../data-raw/community-development-npos.csv' )
+
+## Filtering out address to test the postmastr functions and converting all text to uppercase
+
+d.org.name <- d %>% select( NAME ) %>% rename( "name" = "NAME")
+
+```
+
+
+### Function to standardize Organization Names
+
+```{r}
+
+standardize_names <- function( names ) {
+  
+  # Convert all names to upper case                                         
+  names <- names %>% mutate_if(is.character, str_to_upper)
+  
+  # Establish variables for LLC or INC in the names
+  names <- names %>%  mutate( is_inc = case_when(str_detect(name, "INC|INC.") ~ TRUE,
+                                                 NA ~ NA),
+                                        is_llc = case_when(str_detect(name, "LLC|LLC.") ~ TRUE,
+                                                 NA ~ NA))
+  # Remove instances of LLC or INC in the names
+  names <- names %>%  mutate( name = str_remove_all(name, "INC.|LLC.|,|INC|LLC"))
+  
+  # Standardize words like Corporation and Corp. to corpe
+  names <- names %>% mutate( name = str_replace(name, "CORP.|CORPORATION", "CORP"))
+  
+  
+  return(names)
+  
+}
+```
+
+```{r}
+standardize_names(d.org.name)
+
+```
+
+
